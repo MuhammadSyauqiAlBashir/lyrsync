@@ -198,7 +198,7 @@ input::placeholder { color: var(--fg-4); }
 .controls { padding: 8px 16px 14px; }
 .status { text-align: center; min-height: 1.3em; margin: 0 0 10px; font-size: 14px; color: var(--fg-2); }
 .status.warn { color: var(--accent-2); }
-.buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.buttons { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
 .big-btn {
   position: relative;
   display: flex; align-items: center; justify-content: center; gap: 8px;
@@ -212,6 +212,12 @@ input::placeholder { color: var(--fg-4); }
   overflow: hidden;
 }
 .big-btn:active { transform: scale(0.97); }
+.buttons .big-btn { flex-direction: column; gap: 3px; height: 68px; font-size: 15px; }
+.spotify[aria-pressed="true"] { background: rgba(30, 215, 96, 0.2); border-color: rgba(30, 215, 96, 0.65); }
+.spotify .glyph { color: #1ed760; }
+.line { cursor: pointer; }
+.line:active { color: var(--fg-2); }
+.tap-hint { text-align: center; font-size: 14px; color: var(--fg-2); padding: 2px 16px 6px; }
 .big-btn:disabled { opacity: 0.45; }
 .big-btn .glyph { width: 24px; height: 24px; }
 

@@ -4,7 +4,7 @@ lyrsync.bashir.my.id {
 	encode zstd gzip
 
 	header {
-		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https://*.mzstatic.com; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https://*.mzstatic.com https://i.scdn.co; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 		Permissions-Policy "microphone=(self), camera=(), geolocation=(), payment=(), usb=(), screen-wake-lock=(self)"
 		Cross-Origin-Resource-Policy "same-origin"
 	}

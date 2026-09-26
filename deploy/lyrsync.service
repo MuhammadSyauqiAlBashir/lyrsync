@@ -17,6 +17,8 @@ ExecStart=/opt/lyrsync/venv/bin/uvicorn app:app --app-dir /opt/lyrsync \
 Restart=on-failure
 RestartSec=5
 UMask=0077
+StateDirectory=lyrsync
+StateDirectoryMode=0700
 
 # Resource limits (1GB box)
 MemoryHigh=180M

@@ -30,8 +30,8 @@ sudo install -d -o root -g root -m 755 /srv/lyrsync /srv/lyrsync/icons
 sudo rsync -a --delete --chown=root:root --chmod=D755,F644 "$STAGE/" /srv/lyrsync/
 
 echo "==> pocketbase migrations + hooks"
-sudo install -o pocketbase -g pocketbase -m 640 pb_migrations/*.js /var/lib/pocketbase/pb_migrations/
-sudo install -o pocketbase -g pocketbase -m 640 pb_hooks/*.js /var/lib/pocketbase/pb_hooks/
+sudo install -C -o pocketbase -g pocketbase -m 640 pb_migrations/*.js /var/lib/pocketbase/pb_migrations/
+sudo install -C -o pocketbase -g pocketbase -m 640 pb_hooks/*.js /var/lib/pocketbase/pb_hooks/
 
 echo "==> restart"
 sudo systemctl daemon-reload

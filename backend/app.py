@@ -308,7 +308,7 @@ async def login(body: Credentials, request: Request, response: Response):
                             json={"identity": body.username.strip().lower(), "password": body.password})
     if status == 403:  # correct password, but the authRule (approved = true) failed
         raise HTTPException(403, "Your account is waiting for approval.")
-    if status != 200:
+    if status != 200 or data["record"].get("role") == "service":  # app service logins can't use lyrsync
         raise HTTPException(401, "Wrong username or password.")
     set_session(response, data["token"])
     return {"user": public_user(data["record"])}
@@ -348,7 +348,7 @@ async def change_password(body: PasswordChange, request: Request, s: Session = D
 @app.get("/api/admin/users")
 async def admin_users(request: Request, s: Session = Depends(admin)):
     status, data = await pb(request, "GET", "/api/collections/users/records", s.token,
-                            params={"perPage": 200, "sort": "approved,-created",
+                            params={"perPage": 200, "sort": "approved,-created", "filter": "role != 'service'",
                                     "fields": "id,username,approved,role,created"})
     if status != 200:
         raise HTTPException(502, "Could not load users.")

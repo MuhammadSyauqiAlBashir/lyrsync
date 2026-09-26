@@ -3,9 +3,16 @@ import { Mic, MicError } from "/mic.js?v=__VERSION__"
 // ---------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------
-const ONCE_SAMPLE_S = 7 // seconds recorded before the first try
-const ONCE_MAX_TRIES = 3
-const ALWAYS_SAMPLE_S = 8
+// Listen is progressive, like the Shazam app: try after a short clip, and if
+// there's no match keep recording and retry with a longer one.
+const ONCE_FIRST_S = 4 // seconds recorded before the first try
+const ONCE_STEP_S = 4 // then retry every 4 s (the backend allows 1 request / 4 s)
+const ONCE_MAX_S = 24 // give up after this much listening
+const CLIP_MAX_S = 10 // longest clip sent
+const ALWAYS_FIRST_S = 4 // first try when no song is known yet
+const ALWAYS_SAMPLE_S = 8 // clip length while following a song
+const ERROR_RETRIES = 2 // automatic retries for network/server hiccups
+const MAX_AUTO_WAIT_S = 10 // wait out rate limits up to this long by ourselves
 const ALWAYS_MAX_GAP_MS = 45000 // light check while a song plays (catches skips)
 const ALWAYS_MIN_GAP_MS = 8000
 const RESYNC_FOLLOWUP_MS = 10000 // after a manual resync that found the same song
@@ -473,6 +480,25 @@ async function identify(seconds) {
 }
 
 // Returns true if it was the song already showing.
+// identify() plus automatic retries for transient failures: no connection,
+// server/Shazam errors, and short rate-limit waits. Each retry records fresh
+// audio. Returns null if listening was stopped meanwhile.
+async function identifyRetrying(seconds, my) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await identify(Math.min(seconds(), CLIP_MAX_S))
+    } catch (err) {
+      if (my !== gen) return null
+      const transient = err.status === 0 || err.status >= 500
+      const shortWait = err.status === 429 && err.retryAfter && err.retryAfter <= MAX_AUTO_WAIT_S
+      if (attempt >= ERROR_RETRIES || !(transient || shortWait)) throw err
+      setStatus(shortWait ? `Waiting ${err.retryAfter}s…` : "Connection hiccup, retrying…", true)
+      await sleep(shortWait ? err.retryAfter * 1000 : 1500 * (attempt + 1))
+      if (my !== gen) return null
+    }
+  }
+}
+
 function applyMatch(r) {
   const sync = { offset: r.offset, startedAt: r.startedAt }
   if (sameTrack(r.track, now.track) && now.lyrics !== undefined) {
@@ -517,35 +543,34 @@ async function listenOnce() {
     if (my === gen) { stopAll(); micFailed(err) }
     return
   }
-  let waitUntil = ONCE_SAMPLE_S // in seconds of total recording
-  for (let attempt = 1; attempt <= ONCE_MAX_TRIES; attempt++) {
-    const from = mic.recorded
-    while (mic.recorded < waitUntil) {
+  let nextAt = ONCE_FIRST_S // seconds of total recording before the next try
+  for (let attempt = 1; ; attempt++) {
+    while (mic.recorded < nextAt) {
       if (my !== gen) return
-      const p = (mic.recorded - from) / Math.max(0.1, waitUntil - from)
-      $("listenBtn").style.setProperty("--progress", Math.min(1, p).toFixed(3))
-      await sleep(150)
+      $("listenBtn").style.setProperty("--progress", Math.min(1, mic.recorded / ONCE_MAX_S).toFixed(3))
+      await sleep(100)
     }
     if (my !== gen) return
-    setStatus(attempt === 1 ? "Identifying…" : "Still listening…")
+    setStatus(attempt === 1 ? "Identifying…" : `Still listening… (${Math.round(mic.recorded)}s)`)
     let r
     try {
-      r = await identify(Math.min(mic.buffered, 10))
+      r = await identifyRetrying(() => mic.buffered, my)
     } catch (err) {
       if (my !== gen) return
       stopAll()
       setStatus(err.message, true)
       return
     }
-    if (my !== gen) return
+    if (!r || my !== gen) return
     if (r.match) {
       applyMatch(r)
       stopAll()
       setStatus("")
       return
     }
-    // Shazam asks for more audio before retrying (retry_ms).
-    waitUntil = mic.recorded + Math.max(4, (r.retry_ms || 8000) / 1000)
+    if (mic.recorded >= ONCE_MAX_S) break
+    // Keep recording; the next try sends a longer clip (up to CLIP_MAX_S).
+    nextAt = Math.min(ONCE_MAX_S, mic.recorded + ONCE_STEP_S)
   }
   stopAll()
   setStatus("Couldn't recognise this song. Try again closer to the sound.", true)
@@ -565,7 +590,7 @@ async function startAlways() {
     return
   }
   await acquireWakeLock()
-  scheduleCheck(Math.max(0, (ALWAYS_SAMPLE_S - mic.buffered) * 1000))
+  scheduleCheck(Math.max(0, (ALWAYS_FIRST_S - mic.buffered) * 1000))
 }
 
 function scheduleCheck(ms) {
@@ -590,16 +615,19 @@ async function checkAlways(manual = false) {
   const my = gen
   if (mode !== "always" || checking) return
   if (!mic.active) return pauseAlways("The microphone stopped. Tap Always to resume.")
-  if (mic.buffered < ALWAYS_SAMPLE_S) {
+  // Finding a song: a short clip is enough to try. Following one (checking
+  // for a change): use a full clip so it isn't mostly the previous song.
+  const need = now.track ? ALWAYS_SAMPLE_S : ALWAYS_FIRST_S
+  if (mic.buffered < need) {
     if (manual) setStatus("Listening… checking in a moment")
-    return scheduleCheck((ALWAYS_SAMPLE_S - mic.buffered) * 1000 + 200)
+    return scheduleCheck((need - mic.buffered) * 1000 + 200)
   }
   checking = true
   setListenUi()
   let delayMs
   try {
-    const r = await identify(ALWAYS_SAMPLE_S)
-    if (my !== gen) return
+    const r = await identifyRetrying(() => Math.min(mic.buffered, ALWAYS_SAMPLE_S), my)
+    if (!r || my !== gen) return
     if (r.match) {
       misses = 0
       const same = applyMatch(r)
@@ -621,8 +649,10 @@ async function checkAlways(manual = false) {
       }
       setStatus(manual ? "Couldn't hear the song clearly. Try again in a few seconds."
         : now.track ? "Always listening · following along" : "Always listening · waiting for music", manual)
-      const floor = misses < 3 ? 10000 : misses < 8 ? 20000 : 30000
-      delayMs = Math.max(floor, r.retry_ms || 0)
+      // Just started and nothing yet: try again soon with a longer clip.
+      // After that, back off so silence doesn't burn requests.
+      if (!now.track && misses === 1) delayMs = ONCE_STEP_S * 1000
+      else delayMs = Math.max(misses < 3 ? 10000 : misses < 8 ? 20000 : 30000, r.retry_ms || 0)
     }
   } catch (err) {
     if (my !== gen) return

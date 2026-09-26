@@ -46,6 +46,8 @@ MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources
+# Blocked calls fail with EPERM instead of killing the process (numpy probes mbind).
+SystemCallErrorNumber=EPERM
 CapabilityBoundingSet=
 AmbientCapabilities=
 RemoveIPC=true

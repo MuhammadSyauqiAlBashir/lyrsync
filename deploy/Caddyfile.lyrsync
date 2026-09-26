@@ -19,8 +19,9 @@ lyrsync.bashir.my.id {
 	handle {
 		root * /srv/lyrsync
 		@icons path /icons/*
+		@notIcons not path /icons/*
 		header @icons Cache-Control "public, max-age=604800"
-		header -@icons Cache-Control "no-cache"
+		header @notIcons Cache-Control "no-cache"
 		file_server
 	}
 }

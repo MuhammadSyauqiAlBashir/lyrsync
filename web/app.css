@@ -223,6 +223,13 @@ input::placeholder { color: var(--fg-4); }
   transition: transform 0.2s linear;
 }
 
+#listenBtn .glyph-resync { display: none; }
+#listenBtn.resync .glyph-listen { display: none; }
+#listenBtn.resync .glyph-resync { display: block; }
+#listenBtn.resync { background: rgba(255, 255, 255, 0.14); border-color: var(--line); }
+#listenBtn.resync.checking .glyph-resync { animation: spin 0.9s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 .always[aria-pressed="true"] {
   background: rgba(255, 92, 138, 0.2);
   border-color: rgba(255, 92, 138, 0.6);

@@ -8,6 +8,8 @@ const ONCE_MAX_TRIES = 3
 const ALWAYS_SAMPLE_S = 8
 const ALWAYS_MAX_GAP_MS = 45000 // light check while a song plays (catches skips)
 const ALWAYS_MIN_GAP_MS = 8000
+const RESYNC_FOLLOWUP_MS = 10000 // after a manual resync that found the same song
+const MIN_REQUEST_GAP_MS = 4000 // matches the backend's 1 listen / 4 s limit
 
 // ---------------------------------------------------------------------------
 // Small helpers
@@ -461,13 +463,16 @@ let checking = false
 let misses = 0
 let wakeLock = null
 let resumeOnTap = false
+let lastRequestAt = -Infinity
 
 async function identify(seconds) {
   const clip = mic.take(seconds)
+  lastRequestAt = performance.now()
   const data = await api("/identify", { method: "POST", body: clip.wav, headers: { "Content-Type": "audio/wav" } })
   return { ...data, startedAt: clip.startedAt }
 }
 
+// Returns true if it was the song already showing.
 function applyMatch(r) {
   const sync = { offset: r.offset, startedAt: r.startedAt }
   if (sameTrack(r.track, now.track) && now.lyrics !== undefined) {
@@ -476,17 +481,22 @@ function applyMatch(r) {
     if (!now.lyrics && r.lyrics) now.lyrics = r.lyrics
     curIdx = -2
     renderLyrics()
-  } else {
-    showSong(r.track, r.lyrics, sync)
+    return true
   }
+  showSong(r.track, r.lyrics, sync)
+  return false
 }
 
 function setListenUi() {
   const btn = $("listenBtn")
-  btn.classList.toggle("busy", mode === "once")
-  $("listenLabel").textContent = mode === "once" ? "Stop" : "Listen"
-  if (mode !== "once") btn.style.removeProperty("--progress")
   const on = mode === "always"
+  btn.classList.toggle("busy", mode === "once")
+  btn.classList.toggle("resync", on)
+  btn.classList.toggle("checking", on && checking)
+  btn.disabled = on && checking
+  $("listenLabel").textContent = mode === "once" ? "Stop" : on ? (checking ? "Checking…" : "Resync") : "Listen"
+  btn.setAttribute("aria-label", on ? "Resync: check which song is playing now" : mode === "once" ? "Stop listening" : "Listen")
+  if (mode !== "once") btn.style.removeProperty("--progress")
   $("alwaysBtn").setAttribute("aria-pressed", on)
   $("alwaysLabel").textContent = on ? "Always on" : "Always"
 }
@@ -576,21 +586,32 @@ function nextGapMs() {
   return now.track ? ALWAYS_MAX_GAP_MS : 10000
 }
 
-async function checkAlways() {
+async function checkAlways(manual = false) {
   const my = gen
   if (mode !== "always" || checking) return
   if (!mic.active) return pauseAlways("The microphone stopped. Tap Always to resume.")
-  if (mic.buffered < ALWAYS_SAMPLE_S) return scheduleCheck((ALWAYS_SAMPLE_S - mic.buffered) * 1000 + 200)
+  if (mic.buffered < ALWAYS_SAMPLE_S) {
+    if (manual) setStatus("Listening… checking in a moment")
+    return scheduleCheck((ALWAYS_SAMPLE_S - mic.buffered) * 1000 + 200)
+  }
   checking = true
+  setListenUi()
   let delayMs
   try {
     const r = await identify(ALWAYS_SAMPLE_S)
     if (my !== gen) return
     if (r.match) {
       misses = 0
-      applyMatch(r)
-      setStatus("Always listening · following along")
-      delayMs = nextGapMs()
+      const same = applyMatch(r)
+      if (manual && same) {
+        // You may have tapped right after skipping, while the last few
+        // seconds were still the old song: look once more shortly.
+        setStatus("Resynced · same song")
+        delayMs = Math.min(nextGapMs(), RESYNC_FOLLOWUP_MS)
+      } else {
+        setStatus(manual ? "Resynced · new song" : "Always listening · following along")
+        delayMs = nextGapMs()
+      }
     } else {
       misses++
       const pos = position()
@@ -598,7 +619,8 @@ async function checkAlways() {
       if (now.track && (ended || misses >= 4)) {
         showSong(null, null, null)
       }
-      setStatus(now.track ? "Always listening · following along" : "Always listening · waiting for music")
+      setStatus(manual ? "Couldn't hear the song clearly. Try again in a few seconds."
+        : now.track ? "Always listening · following along" : "Always listening · waiting for music", manual)
       const floor = misses < 3 ? 10000 : misses < 8 ? 20000 : 30000
       delayMs = Math.max(floor, r.retry_ms || 0)
     }
@@ -609,8 +631,29 @@ async function checkAlways() {
     setStatus(err.retryAfter ? `${err.message}` : `${err.message} Retrying soon.`, true)
   } finally {
     checking = false
+    setListenUi()
   }
   if (my === gen && mode === "always") scheduleCheck(delayMs)
+}
+
+// Manual "Resync": check now instead of waiting for the next scheduled check.
+function resync() {
+  if (checking) return
+  clearTimeout(alwaysTimer)
+  const wait = Math.max(0, lastRequestAt + MIN_REQUEST_GAP_MS - performance.now())
+  setStatus("Resyncing…")
+  if (wait > 0) {
+    const my = gen
+    checking = true // show the spinner while we wait out the rate limit
+    setListenUi()
+    setTimeout(() => {
+      checking = false
+      if (my === gen && mode === "always") checkAlways(true)
+      else setListenUi()
+    }, wait)
+  } else {
+    checkAlways(true)
+  }
 }
 
 // Stop capturing but remember Always was on (app hidden, call, etc.).
@@ -643,11 +686,7 @@ mic.onEnded = () => {
 
 $("listenBtn").onclick = () => {
   if (mode === "once") { stopAll(); setStatus(""); return }
-  if (mode === "always") {
-    // Check right now instead of waiting for the next scheduled check.
-    if (!checking) { setStatus("Checking…"); clearTimeout(alwaysTimer); checkAlways() }
-    return
-  }
+  if (mode === "always") { resync(); return }
   listenOnce()
 }
 

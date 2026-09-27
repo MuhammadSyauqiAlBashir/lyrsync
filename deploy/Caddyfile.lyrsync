@@ -1,0 +1,27 @@
+# lyrsync: static web app + /api -> FastAPI on 127.0.0.1:8000
+lyrsync.bashir.my.id {
+	import security
+	encode zstd gzip
+
+	header {
+		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data: https://*.mzstatic.com; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+		Permissions-Policy "microphone=(self), camera=(), geolocation=(), payment=(), usb=(), screen-wake-lock=(self)"
+		Cross-Origin-Resource-Policy "same-origin"
+	}
+
+	handle /api/* {
+		request_body {
+			max_size 1MB
+		}
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	handle {
+		root * /srv/lyrsync
+		@icons path /icons/*
+		@notIcons not path /icons/*
+		header @icons Cache-Control "public, max-age=604800"
+		header @notIcons Cache-Control "no-cache"
+		file_server
+	}
+}

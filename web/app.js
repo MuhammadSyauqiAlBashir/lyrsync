@@ -90,6 +90,19 @@ class ApiError extends Error {
   }
 }
 
+// After the app has slept a long time, iOS often reuses a connection the server
+// already closed, so the first request fails. Retry reads quickly before giving up.
+async function fetchRetry(url, opts = {}, tries = 3) {
+  for (let i = 0; ; i++) {
+    try {
+      return await fetch(url, opts)
+    } catch (err) {
+      if (i >= tries - 1) throw err
+      await new Promise((r) => setTimeout(r, 600 * (i + 1)))
+    }
+  }
+}
+
 async function api(path, { method = "GET", json, body, headers = {} } = {}) {
   const opts = { method, credentials: "same-origin", headers: { "X-Lyrsync": "1", ...headers } }
   if (json !== undefined) {
@@ -100,7 +113,7 @@ async function api(path, { method = "GET", json, body, headers = {} } = {}) {
   }
   let res
   try {
-    res = await fetch("/api" + path, opts)
+    res = await fetchRetry("/api" + path, opts, method === "GET" ? 3 : 1) // never repeat a save
   } catch (_) {
     throw new ApiError(0, "No connection. Check your internet.")
   }
@@ -1144,7 +1157,7 @@ async function boot() {
   setListenUi()
   renderSong()
   try {
-    const res = await fetch("/api/me", { credentials: "same-origin" })
+    const res = await fetchRetry("/api/me", { credentials: "same-origin" }, 4)
     if (res.ok) {
       me = (await res.json()).user
       showApp()
@@ -1159,7 +1172,9 @@ async function boot() {
       showAuth("")
     }
   } catch (_) {
-    showAuth("No connection. Check your internet and reopen the app.")
+    showAuth("No connection yet. Retrying when you're back online…")
+    window.addEventListener("online", () => boot(), { once: true })
+    setTimeout(() => { if (!me) boot() }, 5000)
   }
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {})
 }

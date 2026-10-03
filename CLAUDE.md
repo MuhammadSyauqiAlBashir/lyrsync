@@ -87,6 +87,9 @@ Create/reset a login on the server: `lyr-user` PocketBase CLI command (README); 
 
 ## Open owner tasks
 
+- [ ] (Claude, with the owner's OK) `deploy/lyrsync.service` uses `Restart=on-failure`; the server standard since the
+      2026-09-26 PocketBase outage is `Restart=always` (shop/games already use it). Low-risk unit change, no data impact.
+
 - [ ] Create the Spotify developer app and put its Client ID/Secret into `/etc/lyrsync/env` (steps given
       2026-09-26), then Menu → Spotify on both phones; add the wife's Spotify email under User Management.
 - [ ] Change the owner's login password (the old one was shared in a chat).

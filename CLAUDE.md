@@ -6,6 +6,11 @@ https://lyrsync.bashir.my.id. Users: Bashir (owner, admin username `bashirsyauqi
 Read `README.md` first (sync modes, accounts CLI, deploy, Shazam limits). Server-wide facts (VPS, Caddy,
 PocketBase, security, backups) are in `~/.claude/CLAUDE.md`.
 
+Original conversations (everything the owner asked and decided, 2026-09-26 → 10-03, all apps; search them when a
+detail is missing): `~/work/tx_user.txt` (owner's messages), `~/work/tx_asks.txt` (multiple-choice decisions),
+`~/work/tx_assistant.txt` (Claude's longer answers); raw transcript
+`~/.claude/projects/-home-bashir/b434ae8c-ff15-4ca3-aa6d-842e57f5a2aa.jsonl`.
+
 ## Rules for working on this app
 
 - Never print secrets (Spotify client secret, PocketBase passwords, credential files) into chat or commits.
@@ -42,6 +47,27 @@ PocketBase, security, backups) are in `~/.claude/CLAUDE.md`.
 - **Tap-to-sync** for Apple Music / YouTube Music (no now-playing API on iOS web): search the song, tap the line you
   hear; ⏸/▶. Music playing on the same iPhone can't be heard by the mic (iOS switches to call audio).
 - AudD fallback: not built (owner declined).
+
+## Owner's decisions (interview 2026-09-26)
+
+- Goal: iPhone web app with **Listen** and **Always listen** buttons using the free Shazam package (shazamio).
+- Always-listen = **Smart**: re-checks just after the song should end (song changes caught within ~8 s) plus a
+  light check every 45 s for skips. Don't go below 30 s: ~80 req/h at 45 s, 120 at 30 s, 180 at 20 s (over the
+  150/h per-user cap; risk of Shazam throttling the server's single IP for everyone — shazamio is unofficial).
+  Owner asked for a manual **⟳ Resync** button instead (left button while Always is on; re-aligns timing on the same
+  song, checks once more 10 s later; spins + disabled while checking; waits out the 4 s limit itself).
+- Listen is **progressive**: first try after 4 s, then longer clips (8 s, 10 s) every ~4 s until ~24 s; connection/
+  Shazam errors auto-retry up to 2×; short rate-limit waits (≤10 s) are waited out. Always mode's first try also 4 s;
+  change checks keep full 8 s clips. (Owner may ask to move the first try to 5 s if it's too eager.)
+- Lyrics: **synced + full-lyrics toggle**. Look: **album-art glow**. Language: **English**. Address lyrsync.bashir.my.id.
+- Extras chosen: manual search, sync nudge buttons (±0.5 s), open in Apple Music / Spotify.
+- Accounts: first "static username/password", then changed by the owner to **register + admin approval** with
+  `bashirsyauqi` as superadmin (Approvals page only for admins). History + favourites stored in the **shared
+  PocketBase** so later apps reuse the same accounts.
+- Owner plays music with **Spotify Premium** on his iPhone (also YouTube Music sometimes). iOS gives no app (not
+  even native apps) access to another app's Now Playing info — Android would; so Spotify mode + tap-to-sync.
+- Install: Safari → Share → Add to Home Screen ("Open as Web App" on). Updates: swipe the app closed and reopen
+  (sometimes twice; offline cache). Mic permission: Settings → Apps → Safari → Microphone.
 
 ## Shared accounts (owned by this repo's migrations)
 

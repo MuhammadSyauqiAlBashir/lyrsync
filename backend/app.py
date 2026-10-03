@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import os
 import re
+import secrets
 import time
 import unicodedata
 import wave
@@ -24,9 +26,9 @@ from urllib.parse import quote, urlparse
 
 import aiohttp
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 warnings.filterwarnings("ignore", message="Couldn't find ffmpeg")  # we only send WAV; no ffmpeg needed
 from shazamio import Shazam  # noqa: E402
@@ -41,10 +43,14 @@ USER_AGENT = "lyrsync/1.0 (https://lyrsync.bashir.my.id)"
 COOKIE = "lyr_session"
 COOKIE_MAX_AGE = 30 * 24 * 3600
 EMAIL_DOMAIN = "users.lyrsync.local"  # PocketBase needs an email; nothing is ever sent
+PUBLIC_URL = os.environ.get("LYR_PUBLIC_URL", "https://lyrsync.bashir.my.id")
+SPOTIFY_CLIENT_ID = os.environ.get("LYR_SPOTIFY_CLIENT_ID", "")
+SPOTIFY_CLIENT_SECRET = os.environ.get("LYR_SPOTIFY_CLIENT_SECRET", "")
+STATE_DIR = os.environ.get("LYR_STATE_DIR", "/var/lib/lyrsync")  # per-user Spotify tokens
 
 USERNAME_RE = re.compile(r"^[a-z0-9_]{3,32}$")
 MAX_AUDIO_BYTES = 600_000  # ~18 s of 16 kHz mono 16-bit WAV
-COVER_HOSTS = (".mzstatic.com",)
+COVER_HOSTS = (".mzstatic.com", ".scdn.co")  # Apple (Shazam) and Spotify cover art
 
 
 # --------------------------------------------------------------------------
@@ -148,7 +154,9 @@ async def lifespan(app: FastAPI):
     state["shazam"] = Shazam(language="en-US", endpoint_country=SHAZAM_COUNTRY, http_client=shazam_http)
     state["pb"] = httpx.AsyncClient(base_url=PB_URL, timeout=10)
     state["lrclib"] = httpx.AsyncClient(base_url=LRCLIB_URL, timeout=10, headers={"User-Agent": USER_AGENT})
+    state["spotify"] = httpx.AsyncClient(timeout=10)
     yield
+    await state["spotify"].aclose()
     await shazam_http.close()
     await state["pb"].aclose()
     await state["lrclib"].aclose()
@@ -308,7 +316,7 @@ async def login(body: Credentials, request: Request, response: Response):
                             json={"identity": body.username.strip().lower(), "password": body.password})
     if status == 403:  # correct password, but the authRule (approved = true) failed
         raise HTTPException(403, "Your account is waiting for approval.")
-    if status != 200:
+    if status != 200 or (data["record"].get("role") or "") not in ("", "admin"):  # app service logins can't use lyrsync
         raise HTTPException(401, "Wrong username or password.")
     set_session(response, data["token"])
     return {"user": public_user(data["record"])}
@@ -348,7 +356,7 @@ async def change_password(body: PasswordChange, request: Request, s: Session = D
 @app.get("/api/admin/users")
 async def admin_users(request: Request, s: Session = Depends(admin)):
     status, data = await pb(request, "GET", "/api/collections/users/records", s.token,
-                            params={"perPage": 200, "sort": "approved,-created",
+                            params={"perPage": 200, "sort": "approved,-created", "filter": "role = '' || role = 'admin'",
                                     "fields": "id,username,approved,role,created"})
     if status != 200:
         raise HTTPException(502, "Could not load users.")
@@ -786,6 +794,186 @@ async def favorite_delete(rid: str, request: Request, s: Session = Depends(curre
     if status != 204:
         raise HTTPException(404, "Not found.")
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------
+# Spotify: follow what's playing on the phone (no microphone)
+# --------------------------------------------------------------------------
+# Authorization-code flow. The callback arrives from accounts.spotify.com, so
+# the SameSite=Strict session cookie isn't sent; a one-time `state` value maps
+# the callback back to the person who started it. Each person's tokens live in
+# STATE_DIR/spotify/<user id>.json (0600, readable only by this service).
+
+SPOTIFY_SCOPES = "user-read-currently-playing user-read-playback-state"
+SPOTIFY_REDIRECT = f"{PUBLIC_URL}/api/spotify/callback"
+_oauth_states: dict[str, tuple[float, str]] = {}
+_spotify_tracks: OrderedDict[str, dict] = OrderedDict()  # track id -> {track, lyrics}
+now_limit = Window(1, 1.5)  # per user
+
+
+def spotify_ready() -> bool:
+    return bool(SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET)
+
+
+def token_path(user_id: str) -> str:
+    if not PB_ID_RE.match(user_id):
+        raise HTTPException(400, "Bad user.")
+    return os.path.join(STATE_DIR, "spotify", f"{user_id}.json")
+
+
+def load_tokens(user_id: str) -> dict | None:
+    try:
+        with open(token_path(user_id)) as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return None
+
+
+def save_tokens(user_id: str, tokens: dict):
+    path = token_path(user_id)
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(tokens, f)
+    os.replace(tmp, path)
+
+
+async def spotify_token_request(data: dict) -> dict:
+    r = await state["spotify"].post("https://accounts.spotify.com/api/token", data=data,
+                                    auth=(SPOTIFY_CLIENT_ID, SPOTIFY_CLIENT_SECRET))
+    if r.status_code != 200:
+        log.warning("spotify token error %s: %s", r.status_code, r.text[:200])
+        raise HTTPException(502, "Spotify didn't accept the login. Try connecting again.")
+    return r.json()
+
+
+async def access_token(user_id: str) -> str:
+    tokens = load_tokens(user_id)
+    if not tokens:
+        raise HTTPException(409, "Spotify isn't connected.")
+    if tokens.get("expires_at", 0) - time.time() > 60:
+        return tokens["access_token"]
+    fresh = await spotify_token_request({"grant_type": "refresh_token", "refresh_token": tokens["refresh_token"]})
+    tokens.update(access_token=fresh["access_token"], expires_at=time.time() + int(fresh.get("expires_in", 3600)))
+    if fresh.get("refresh_token"):
+        tokens["refresh_token"] = fresh["refresh_token"]
+    save_tokens(user_id, tokens)
+    return tokens["access_token"]
+
+
+@app.get("/api/spotify/status")
+async def spotify_status(s: Session = Depends(current)):
+    return {"available": spotify_ready(), "connected": bool(load_tokens(s.user["id"]))}
+
+
+@app.post("/api/spotify/login")
+async def spotify_login(s: Session = Depends(current)):
+    if not spotify_ready():
+        raise HTTPException(503, "Spotify isn't set up on the server yet.")
+    now = time.time()
+    for k, (t, _) in list(_oauth_states.items()):
+        if now - t > 600:
+            _oauth_states.pop(k, None)
+    st = secrets.token_urlsafe(24)
+    _oauth_states[st] = (now, s.user["id"])
+    q = {"response_type": "code", "client_id": SPOTIFY_CLIENT_ID, "scope": SPOTIFY_SCOPES,
+         "redirect_uri": SPOTIFY_REDIRECT, "state": st, "show_dialog": "false"}
+    return {"url": "https://accounts.spotify.com/authorize?" + "&".join(f"{k}={quote(v)}" for k, v in q.items())}
+
+
+@app.get("/api/spotify/callback")
+async def spotify_callback(state_: str = Query("", alias="state"), code: str = "", error: str = ""):
+    item = _oauth_states.pop(state_, None)
+    if not item or time.time() - item[0] > 600:
+        return RedirectResponse("/#spotify-error", status_code=303)
+    if error or not code:
+        return RedirectResponse("/#spotify-cancelled", status_code=303)
+    tok = await spotify_token_request({"grant_type": "authorization_code", "code": code,
+                                      "redirect_uri": SPOTIFY_REDIRECT})
+    save_tokens(item[1], {"access_token": tok["access_token"], "refresh_token": tok["refresh_token"],
+                          "expires_at": time.time() + int(tok.get("expires_in", 3600))})
+    return RedirectResponse("/#spotify-connected", status_code=303)
+
+
+@app.post("/api/spotify/disconnect")
+async def spotify_disconnect(s: Session = Depends(current)):
+    try:
+        os.remove(token_path(s.user["id"]))
+    except FileNotFoundError:
+        pass
+    return {"ok": True}
+
+
+async def lyrics_exact(title: str, artist: str, album: str, duration_s: float) -> dict | None:
+    """LRCLIB's exact match uses the duration (±2 s), so Spotify tracks match precisely."""
+    key = f"exact:{norm(title)}|{norm(artist)}|{round(duration_s)}"
+    if key in _lyrics_cache:
+        return _lyrics_cache[key]
+    item = await lrclib_get("/api/get", {"track_name": title, "artist_name": artist, "album_name": album,
+                                         "duration": round(duration_s)})
+    if not item or not (item.get("syncedLyrics") or item.get("plainLyrics") or item.get("instrumental")):
+        result = await find_lyrics(title, artist, album)
+    else:
+        result = lyrics_payload(item)
+    cache_put(key, result)
+    return result
+
+
+def track_from_spotify(item: dict) -> dict:
+    artists = ", ".join(a.get("name", "") for a in item.get("artists") or [])
+    album = item.get("album") or {}
+    images = sorted(album.get("images") or [], key=lambda i: -(i.get("width") or 0))
+    title = item.get("name") or ""
+    return {
+        "track_id": f"spotify:{item.get('id')}"[:100],
+        "title": title[:300], "artist": artists[:300], "album": (album.get("name") or "")[:300],
+        "cover": https_or_empty(images[0]["url"] if images else "", COVER_HOSTS),
+        "isrc": ((item.get("external_ids") or {}).get("isrc") or "")[:20],
+        "source": "spotify",
+        "duration": round((item.get("duration_ms") or 0) / 1000, 1),
+        "apple_url": f"https://music.apple.com/search?term={quote(f'{title} {artists}')}",
+        "spotify_url": https_or_empty((item.get("external_urls") or {}).get("spotify"), ("open.spotify.com",)),
+    }
+
+
+@app.get("/api/spotify/now")
+async def spotify_now(s: Session = Depends(current)):
+    """What's playing on this person's Spotify, with the position in ms."""
+    uid = s.user["id"]
+    if wait := now_limit.retry_after(uid):
+        limited(wait, "checks")
+    token = await access_token(uid)
+    t0 = time.time()
+    r = await state["spotify"].get("https://api.spotify.com/v1/me/player/currently-playing",
+                                   params={"additional_types": "track"}, headers={"Authorization": f"Bearer {token}"})
+    if r.status_code == 204:
+        return {"playing": False, "reason": "Nothing is playing on Spotify."}
+    if r.status_code == 401:
+        raise HTTPException(409, "Spotify needs to be connected again.")
+    if r.status_code == 429:
+        limited(int(r.headers.get("retry-after", "10")), "requests to Spotify right now")
+    if r.status_code != 200:
+        raise HTTPException(502, "Spotify didn't answer. Try again.")
+    data = r.json()
+    item = data.get("item")
+    if not item or data.get("currently_playing_type") != "track":
+        return {"playing": False, "reason": "Spotify is playing something that isn't a song (podcast or ad)."}
+    tid = item.get("id") or ""
+    hit = _spotify_tracks.get(tid)
+    if not hit:
+        track = track_from_spotify(item)
+        lyr = await lyrics_exact(track["title"], track["artist"].split(", ")[0], track["album"], track["duration"])
+        if lyr:
+            track["lrclib_id"] = lyr.get("lrclib_id")
+        hit = {"track": track, "lyrics": lyr}
+        _spotify_tracks[tid] = hit
+        while len(_spotify_tracks) > 200:
+            _spotify_tracks.popitem(last=False)
+    # Position at the moment Spotify answered (half the round trip is a fair guess).
+    rtt = time.time() - t0
+    return {"playing": True, "is_playing": bool(data.get("is_playing")),
+            "progress_ms": int(data.get("progress_ms") or 0) + int(rtt * 500), **hit}
 
 
 @app.get("/api/health")

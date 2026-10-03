@@ -90,6 +90,19 @@ class ApiError extends Error {
   }
 }
 
+// After the app has slept a long time, iOS often reuses a connection the server
+// already closed, so the first request fails. Retry reads quickly before giving up.
+async function fetchRetry(url, opts = {}, tries = 3) {
+  for (let i = 0; ; i++) {
+    try {
+      return await fetch(url, opts)
+    } catch (err) {
+      if (i >= tries - 1) throw err
+      await new Promise((r) => setTimeout(r, 600 * (i + 1)))
+    }
+  }
+}
+
 async function api(path, { method = "GET", json, body, headers = {} } = {}) {
   const opts = { method, credentials: "same-origin", headers: { "X-Lyrsync": "1", ...headers } }
   if (json !== undefined) {
@@ -100,7 +113,7 @@ async function api(path, { method = "GET", json, body, headers = {} } = {}) {
   }
   let res
   try {
-    res = await fetch("/api" + path, opts)
+    res = await fetchRetry("/api" + path, opts, method === "GET" ? 3 : 1) // never repeat a save
   } catch (_) {
     throw new ApiError(0, "No connection. Check your internet.")
   }
@@ -209,7 +222,39 @@ let raf = 0
 
 function position(t = performance.now()) {
   if (!now.sync) return null
+  if (now.sync.pausedAt) t = now.sync.pausedAt // paused (Spotify paused, or tap-to-sync pause)
   return now.sync.offset + (t - now.sync.startedAt) / 1000 - delay
+}
+
+// Tap-to-sync: works for any app (YouTube Music, Apple Music…) without the mic.
+// People tap a moment after a line starts, so allow for that reaction time.
+const TAP_REACTION_S = 0.35
+function syncToLine(i) {
+  if (spotify.on || !now.lyrics || !now.lyrics.synced) return
+  now.sync = { offset: now.lyrics.synced[i].t + TAP_REACTION_S + delay, startedAt: performance.now(), manual: true }
+  curIdx = -2
+  $("tapHint").hidden = true
+  updatePauseButton()
+  startTicker()
+  setStatus("Synced to your tap. Tap another line to correct it.")
+}
+
+function updatePauseButton() {
+  const b = $("pauseSync")
+  b.hidden = !(now.sync && now.sync.manual)
+  b.textContent = now.sync && now.sync.pausedAt ? "▶" : "⏸"
+  b.setAttribute("aria-label", now.sync && now.sync.pausedAt ? "Resume the lyrics" : "Pause the lyrics")
+}
+
+$("pauseSync").onclick = () => {
+  if (!now.sync) return
+  if (now.sync.pausedAt) {
+    now.sync.startedAt += performance.now() - now.sync.pausedAt
+    now.sync.pausedAt = null
+  } else {
+    now.sync.pausedAt = performance.now()
+  }
+  updatePauseButton()
 }
 
 function sameTrack(a, b) {
@@ -232,6 +277,7 @@ function renderSong() {
   $("songCard").hidden = !t
   $("emptyState").hidden = !!t
   if (!t) {
+    $("tapHint").hidden = true
     setBackdrop("")
     $("lyricsTools").hidden = true
     $("syncedView").hidden = true
@@ -265,6 +311,7 @@ function renderLyrics() {
   notice.hidden = true
   $("syncedView").hidden = true
   $("fullView").hidden = true
+  $("tapHint").hidden = true
   stopTicker()
 
   if (L === undefined) {
@@ -310,16 +357,19 @@ function renderLyrics() {
 
   // Synced view
   const box = $("syncedLines")
-  lineEls = L.synced.map((l) => el("div", { class: "line" + (l.text ? "" : " gap"), text: l.text }))
+  lineEls = L.synced.map((l, i) => el("div", { class: "line" + (l.text ? "" : " gap"), text: l.text, onclick: () => syncToLine(i) }))
   box.replaceChildren(...lineEls)
   curIdx = -2
   $("syncedView").hidden = false
+  updatePauseButton()
   if (!now.sync) {
-    notice.hidden = false
-    notice.textContent = "Tap Listen while the song plays to sync the lyrics."
-    $("syncedView").hidden = true
+    // Not synced yet: show the lyrics from the top and let a tap set the timing.
+    $("tapHint").hidden = spotify.on
+    for (const [i, e] of lineEls.entries()) e.className = "line" + (L.synced[i].text ? "" : " gap") + (i < 3 ? " near" : "")
+    centerOn(0)
     return
   }
+  $("tapHint").hidden = true
   startTicker()
 }
 
@@ -715,14 +765,138 @@ mic.onEnded = () => {
 }
 
 $("listenBtn").onclick = () => {
+  if (spotify.on) stopSpotify()
   if (mode === "once") { stopAll(); setStatus(""); return }
   if (mode === "always") { resync(); return }
   listenOnce()
 }
 
 $("alwaysBtn").onclick = () => {
+  if (spotify.on) stopSpotify()
   if (mode === "always") { stopAll(); setStatus("") } else startAlways()
 }
+
+// ---------------------------------------------------------------------------
+// Spotify: follow what's playing on this phone's Spotify (no microphone)
+// ---------------------------------------------------------------------------
+const spotify = { available: false, connected: false, on: false, timer: 0, gen: 0, lastId: "" }
+
+async function loadSpotifyStatus() {
+  try {
+    const st = await api("/spotify/status")
+    spotify.available = st.available
+    spotify.connected = st.connected
+  } catch (_) {}
+  renderSpotifySheet()
+}
+
+function renderSpotifySheet() {
+  $("spotifyConnect").hidden = spotify.connected
+  $("spotifyDisconnect").hidden = !spotify.connected
+  $("spotifyText").textContent = !spotify.available
+    ? "Spotify isn't set up on the server yet. The admin needs to add the Spotify app keys."
+    : spotify.connected ? "Connected. Tap the Spotify button to follow what's playing."
+    : "Follow what's playing on your Spotify: exact song and position, no microphone. Needs a one-time login."
+}
+
+async function connectSpotify() {
+  if (!spotify.available) { toast("Spotify isn't set up on the server yet."); return }
+  try {
+    const { url } = await api("/spotify/login", { method: "POST" })
+    location.href = url
+  } catch (err) { toast(err.message) }
+}
+
+$("spotifyConnect").onclick = connectSpotify
+$("spotifyDisconnect").onclick = async () => {
+  await api("/spotify/disconnect", { method: "POST" }).catch(() => {})
+  stopSpotify()
+  spotify.connected = false
+  renderSpotifySheet()
+  toast("Spotify disconnected")
+}
+
+function setSpotifyUi() {
+  $("spotifyBtn").setAttribute("aria-pressed", spotify.on)
+  $("spotifyLabel").textContent = spotify.on ? "Following" : "Spotify"
+}
+
+async function startSpotify() {
+  if (!spotify.connected) return connectSpotify()
+  stopAll() // mic modes off: music on this phone and the mic don't mix on iOS
+  spotify.on = true
+  spotify.gen++
+  setSpotifyUi()
+  setStatus("Following Spotify…")
+  await acquireWakeLock()
+  pollSpotify()
+}
+
+function stopSpotify() {
+  spotify.on = false
+  spotify.gen++
+  clearTimeout(spotify.timer)
+  releaseWakeLock()
+  setSpotifyUi()
+  if (now.sync && !now.sync.manual) {
+    now.sync = null
+    if (now.track) renderLyrics()
+  }
+  setStatus("")
+}
+
+function scheduleSpotify(ms) {
+  clearTimeout(spotify.timer)
+  const my = spotify.gen
+  spotify.timer = setTimeout(() => { if (my === spotify.gen && spotify.on) pollSpotify() }, ms)
+}
+
+async function pollSpotify() {
+  const my = spotify.gen
+  if (!spotify.on || document.hidden) return
+  let next = 5000
+  try {
+    const r = await api("/spotify/now")
+    if (my !== spotify.gen) return
+    if (!r.playing) {
+      setStatus(r.reason || "Nothing is playing on Spotify.")
+      if (now.sync) now.sync.pausedAt = now.sync.pausedAt || performance.now()
+      next = 6000
+    } else {
+      const sync = { offset: r.progress_ms / 1000, startedAt: performance.now(), pausedAt: r.is_playing ? null : performance.now() }
+      if (!sameTrack(r.track, now.track)) {
+        showSong(r.track, r.lyrics, sync)
+        if (r.is_playing && spotify.lastId !== r.track.track_id) {
+          api("/history", { method: "POST", json: trackPayload(r.track) }).catch(() => {})
+        }
+      } else {
+        now.sync = sync
+        if (!now.lyrics && r.lyrics) { now.lyrics = r.lyrics; renderLyrics() }
+        curIdx = -2
+        if (!raf && now.lyrics && now.lyrics.synced && !$("syncedView").hidden) startTicker()
+      }
+      spotify.lastId = r.track.track_id
+      setStatus(r.is_playing ? "Following Spotify" : "Paused on Spotify")
+      // Check right after the song should end, otherwise every 5 s (catches seeks and skips).
+      const left = (r.track.duration || 0) * 1000 - r.progress_ms
+      next = r.is_playing && left > 0 ? Math.max(1500, Math.min(5000, left + 800)) : 5000
+    }
+  } catch (err) {
+    if (my !== spotify.gen) return
+    if (err.status === 409) {
+      spotify.connected = false
+      stopSpotify()
+      renderSpotifySheet()
+      setStatus("Spotify needs to be connected again (Menu → Spotify).", true)
+      return
+    }
+    setStatus(err.message, true)
+    next = err.retryAfter ? err.retryAfter * 1000 : 10000
+  }
+  scheduleSpotify(next)
+}
+
+$("spotifyBtn").onclick = () => { if (spotify.on) stopSpotify(); else startSpotify() }
 
 // ----- Screen wake lock (keeps the screen on while Always is on) -----
 async function acquireWakeLock() {
@@ -745,11 +919,13 @@ function releaseWakeLock() {
 document.addEventListener("visibilitychange", async () => {
   if (document.hidden) {
     stopTicker()
+    clearTimeout(spotify.timer)
     if (mode === "always") pauseAlways("Paused while the app was in the background.")
     else if (mode === "once") { stopAll(); setStatus("") }
     return
   }
   if (now.sync && now.lyrics && now.lyrics.synced && !$("syncedView").hidden) startTicker()
+  if (spotify.on && me) { await acquireWakeLock(); pollSpotify() }
   if (resumeOnTap && me) {
     // Try to resume straight away; iOS may insist on a tap first, in which
     // case startAlways leaves a "tap to resume" message.
@@ -772,6 +948,7 @@ function openSheet(id) {
   if (id === "historySheet") loadList("history", true)
   if (id === "favSheet") loadList("favorites", true)
   if (id === "adminSheet") loadAdmin()
+  if (id === "spotifySheet") loadSpotifyStatus()
   if (id === "accountSheet") { $("pwMsg").textContent = ""; $("pwForm").reset(); $("pwUser").value = me.username }
 }
 
@@ -964,6 +1141,7 @@ $("pwForm").addEventListener("submit", async (e) => {
 
 $("logoutBtn").onclick = async () => {
   await api("/logout", { method: "POST" }).catch(() => {})
+  if (spotify.on) stopSpotify()
   stopAll()
   me = null
   now.track = null
@@ -979,15 +1157,24 @@ async function boot() {
   setListenUi()
   renderSong()
   try {
-    const res = await fetch("/api/me", { credentials: "same-origin" })
+    const res = await fetchRetry("/api/me", { credentials: "same-origin" }, 4)
     if (res.ok) {
       me = (await res.json()).user
       showApp()
+      await loadSpotifyStatus()
+      const h = location.hash
+      if (h.startsWith("#spotify-")) {
+        history.replaceState(null, "", location.pathname)
+        if (h === "#spotify-connected") { toast("Spotify connected 🎉"); startSpotify() }
+        else toast(h === "#spotify-cancelled" ? "Spotify connection cancelled." : "Spotify connection expired. Try again.")
+      }
     } else {
       showAuth("")
     }
   } catch (_) {
-    showAuth("No connection. Check your internet and reopen the app.")
+    showAuth("No connection yet. Retrying when you're back online…")
+    window.addEventListener("online", () => boot(), { once: true })
+    setTimeout(() => { if (!me) boot() }, 5000)
   }
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {})
 }

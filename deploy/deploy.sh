@@ -17,6 +17,9 @@ sudo install -d -o root -g root -m 755 /opt/lyrsync
 sudo /opt/lyrsync/venv/bin/pip install --quiet --disable-pip-version-check -r backend/requirements.txt
 sudo install -o root -g root -m 644 backend/app.py /opt/lyrsync/app.py
 sudo install -o root -g root -m 644 deploy/lyrsync.service /etc/systemd/system/lyrsync.service
+if sudo test -f /etc/lyrsync/env; then
+  sudo chown root:lyrsync /etc/lyrsync /etc/lyrsync/env && sudo chmod 750 /etc/lyrsync && sudo chmod 640 /etc/lyrsync/env
+fi
 
 echo "==> web"
 STAGE="$(mktemp -d)"
@@ -27,8 +30,8 @@ sudo install -d -o root -g root -m 755 /srv/lyrsync /srv/lyrsync/icons
 sudo rsync -a --delete --chown=root:root --chmod=D755,F644 "$STAGE/" /srv/lyrsync/
 
 echo "==> pocketbase migrations + hooks"
-sudo install -o pocketbase -g pocketbase -m 640 pb_migrations/*.js /var/lib/pocketbase/pb_migrations/
-sudo install -o pocketbase -g pocketbase -m 640 pb_hooks/*.js /var/lib/pocketbase/pb_hooks/
+sudo install -C -o pocketbase -g pocketbase -m 640 pb_migrations/*.js /var/lib/pocketbase/pb_migrations/
+sudo install -C -o pocketbase -g pocketbase -m 640 pb_hooks/*.js /var/lib/pocketbase/pb_hooks/
 
 echo "==> restart"
 sudo systemctl daemon-reload

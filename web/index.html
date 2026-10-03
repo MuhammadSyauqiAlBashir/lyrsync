@@ -83,15 +83,17 @@
         <button type="button" id="viewFull" aria-pressed="false">Full</button>
       </div>
       <div class="nudge" id="nudge">
+        <button type="button" id="pauseSync" aria-label="Pause the lyrics" hidden>⏸</button>
         <button type="button" id="nudgeMinus" aria-label="Lyrics earlier by half a second">−0.5s</button>
         <span id="nudgeValue">0.0s</span>
         <button type="button" id="nudgePlus" aria-label="Lyrics later by half a second">+0.5s</button>
       </div>
     </div>
 
+    <p class="tap-hint" id="tapHint" hidden>Tap the line you're hearing to sync.</p>
     <div class="empty" id="emptyState">
       <div class="empty-title">Tap <b>Listen</b> to find the song.</div>
-      <div class="empty-sub"><b>Always</b> keeps listening and follows along as songs change. Skipped a song? Tap <b>Resync</b>.</div>
+      <div class="empty-sub"><b>Always</b> keeps listening and follows along as songs change. Playing music on this phone? Use <b>Spotify</b>, or search the song and tap the line you hear.</div>
     </div>
 
     <div class="synced" id="syncedView" hidden><div class="synced-lines" id="syncedLines"></div></div>
@@ -111,6 +113,10 @@
         <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><path d="M7.5 8.5c-2 0-3.5 1.6-3.5 3.5s1.5 3.5 3.5 3.5c3.5 0 5.5-7 9-7 2 0 3.5 1.6 3.5 3.5s-1.5 3.5-3.5 3.5c-3.5 0-5.5-7-9-7z"/></svg>
         <span id="alwaysLabel">Always</span>
       </button>
+      <button class="big-btn spotify" id="spotifyBtn" type="button" aria-pressed="false">
+        <svg class="glyph" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M7.5 9.5c3-1 6.5-.8 9.5.8M8 12.6c2.5-.7 5.2-.5 7.6.7M8.6 15.5c2-.5 3.9-.3 5.6.5"/></svg>
+        <span id="spotifyLabel">Spotify</span>
+      </button>
     </div>
   </footer>
 </div>
@@ -121,6 +127,7 @@
   <nav class="menu">
     <button type="button" data-open="historySheet">History</button>
     <button type="button" data-open="favSheet">Favourites</button>
+    <button type="button" data-open="spotifySheet">Spotify</button>
     <button type="button" data-open="searchSheet">Search lyrics</button>
     <button type="button" data-open="adminSheet" id="adminMenuItem" hidden>Approvals</button>
     <button type="button" data-open="accountSheet">Account</button>
@@ -152,6 +159,14 @@
 <dialog class="sheet tall" id="adminSheet">
   <div class="sheet-head"><h2>Approvals</h2><button class="icon-btn" data-close type="button" aria-label="Close">✕</button></div>
   <ul class="list" id="adminList"></ul>
+</dialog>
+
+<dialog class="sheet" id="spotifySheet">
+  <div class="sheet-head"><h2>Spotify</h2><button class="icon-btn" data-close type="button" aria-label="Close">✕</button></div>
+  <p class="account-line" id="spotifyText">Follow what's playing on your Spotify: exact song and position, no microphone.</p>
+  <button class="btn primary wide" id="spotifyConnect" type="button">Connect Spotify</button>
+  <button class="btn ghost wide danger" id="spotifyDisconnect" type="button" hidden>Disconnect Spotify</button>
+  <p class="hint small" style="margin-top:12px">Playing from YouTube Music or another app? Search the song (Menu → Search lyrics), then tap the line you're hearing to sync it.</p>
 </dialog>
 
 <dialog class="sheet" id="accountSheet">
